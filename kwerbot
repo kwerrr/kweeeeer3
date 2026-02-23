@@ -19,7 +19,7 @@ import configparser
 config = configparser.ConfigParser()
 config.read('config.ini')
 
-BOT_TOKEN = '5535099045:AAFBCoy4tefECBold4l7hHSXgESr52Rcess'
+BOT_TOKEN = '8257496038:AAF51rV91ks99RaXUi33V7zEo4Ps9hXUHPQ'
 ADMIN_IDS = '2023413492'
 SUPPORT_USERNAME = 'supporOTC'
 WEBSITE_URL = 'https://playerok.com'
