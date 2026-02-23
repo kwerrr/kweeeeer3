@@ -325,7 +325,7 @@ async def cmd_start(message: types.Message, command: CommandStart):
         f"{hbold('👋 Добро пожаловать в Playerok!')}\n\n"
         f"Сервис, обеспечивающий безопасность и удобство проведения сделок.\n\n"
         f"📢 Наш канал — @playerok_com\n"
-        f"🛟 Поддержка — доступна прямо в боте\n\n"
+        f"🛟 Поддержка — @supporOTC\n\n"
         f"👇 Нажмите кнопку ниже, чтобы продолжить"
     )
     
