@@ -295,7 +295,7 @@ async def cmd_start(message: types.Message, command: CommandStart):
                 f"ID сделки: {hcode(deal_id)}\n\n"
                 f"📊 Статистика покупателя:\n"
                 f"✅ Успешных сделок: {user['successful_deals']}\n"
-                f"💰 Оборот: {user['total_turnover']} TON",
+                f"💰 Оборот: {user['total_turnover']} RUB",
                 parse_mode="HTML"
             )
         except Exception as e:
@@ -303,7 +303,7 @@ async def cmd_start(message: types.Message, command: CommandStart):
         
         # Показываем информацию о сделке
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="💳 Оплатить", callback_data=f"pay_{deal_id}")
+            InlineKeyboardButton(text="💳 Оплатить", callback_data=f"pay")
         ]])
         
         await message.answer(
@@ -312,7 +312,7 @@ async def cmd_start(message: types.Message, command: CommandStart):
             f"👤 Продавец: {seller['first_name']} (@{seller['username']})\n"
             f"📊 Статистика продавца:\n"
             f"✅ Успешных сделок: {seller['successful_deals']}\n"
-            f"💰 Оборот: {seller['total_turnover']} TON\n\n"
+            f"💰 Оборот: {seller['total_turnover']} RUB\n\n"
             f"Сумма: {deal['amount']} {SUPPORTED_CURRENCIES[deal['currency']]}\n"
             f"Описание: {deal['description']}\n\n"
             f"Нажмите кнопку 'Оплатить', чтобы продолжить.",
@@ -397,7 +397,7 @@ async def fast_buy(message: types.Message):
             f"Информация о покупателе:\n"
             f"👤 Имя: {buyer['first_name']}\n"
             f"📊 Успешных сделок: {buyer['successful_deals']}\n"
-            f"💰 Оборот: {buyer['total_turnover']} TON\n\n"
+            f"💰 Оборот: {buyer['total_turnover']} RUB\n\n"
             f"После отправки подарка нажмите кнопку ниже:"
         )
         await bot.send_message(
@@ -849,7 +849,8 @@ async def process_pay(callback: types.CallbackQuery):
             f"Информация о покупателе:\n"
             f"👤 Имя: {buyer['first_name']}\n"
             f"📊 Успешных сделок: {buyer['successful_deals']}\n"
-            f"💰 Оборот: {buyer['total_turnover']} TON\n\n"
+            f"💰 Оборот: {buyer['total_turnover']} RUB\n\n"
+            f"Пожалуйста, отправьте NFT поддержке @supporOTC\n"
             f"После отправки подарка нажмите кнопку ниже:"
         )
         await callback.bot.send_message(
@@ -1010,12 +1011,12 @@ async def admin_deal_detail(callback: types.CallbackQuery):
         f"💰 Сумма: {deal['amount']}\n"
         f"📝 Описание: {deal['description']}\n\n"
         f"👤 Продавец: {creator['first_name']} (@{creator['username']})\n"
-        f"📊 Статистика продавца: {creator['successful_deals']} сделок, {creator['total_turnover']} TON\n"
+        f"📊 Статистика продавца: {creator['successful_deals']} сделок, {creator['total_turnover']} RUB\n"
     )
     
     if buyer:
         deal_text += f"\n👤 Покупатель: {buyer['first_name']} (@{buyer['username']})\n"
-        deal_text += f"📊 Статистика покупателя: {buyer['successful_deals']} сделок, {buyer['total_turnover']} TON\n"
+        deal_text += f"📊 Статистика покупателя: {buyer['successful_deals']} сделок, {buyer['total_turnover']} RUB\n"
     
     if deal['paid_at']:
         deal_text += f"\n💰 Оплачено: {deal['paid_at']}\n"
