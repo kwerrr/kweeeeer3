@@ -849,7 +849,7 @@ async def process_pay(callback: types.CallbackQuery):
             f"👤 Имя: {buyer['first_name']}\n"
             f"📊 Успешных сделок: {buyer['successful_deals']}\n"
             f"💰 Оборот: {buyer['total_turnover']} RUB\n\n"
-            f"Пожалуйста, отправьте NFT поддержке @supporOTC\n"
+            f"Пожалуйста, отправьте NFT поддержке @supporOTC\n\n"
             f"После отправки подарка нажмите кнопку ниже:"
         )
         await callback.bot.send_message(
