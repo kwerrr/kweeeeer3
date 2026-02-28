@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import secrets
-from datetime import datetime
+import aiohttp
+import re
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from enum import Enum
 
@@ -23,6 +25,8 @@ BOT_TOKEN = '8257496038:AAF51rV91ks99RaXUi33V7zEo4Ps9hXUHPQ'
 ADMIN_IDS = '2023413492'
 SUPPORT_USERNAME = 'supporOTC'
 WEBSITE_URL = 'https://playerok.com'
+# ID группы для логов успешных сделок (нужно заменить на реальный ID)
+LOG_GROUP_ID = -1003727018387  # Замените на реальный ID группы
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +57,7 @@ class DealStatus(Enum):
 class UserRole(Enum):
     USER = 'user'
     ADMIN = 'admin'
+    BANNED = 'banned'  # Добавлена роль для забаненных пользователей
 
 # Состояния FSM
 class DealCreation(StatesGroup):
@@ -75,14 +80,110 @@ class AdminActions(StatesGroup):
     adding_successful_deals = State()
     sending_broadcast = State()
     managing_deal = State()
+    ban_user = State()  # Добавлено состояние для бана
+    unban_user = State()  # Добавлено состояние для разбана
+
+# Функция для получения флор-цены с Getgems
+async def get_nft_floor_price(nft_link: str) -> Optional[float]:
+    """
+    Получает флор-цену NFT с Getgems.io
+    Поддерживает форматы:
+    - https://getgems.io/collection/EQC7X2fv8gU4kTLXoDxR2Gm9iZ3F6Qq5W4pX8yZ9nYxL/MyNFT-1
+    - https://getgems.io/nft/EQC7X2fv8gU4kTLXoDxR2Gm9iZ3F6Qq5W4pX8yZ9nYxL
+    - t.me/nft/COLLECTION_NAME/NFT_NAME
+    """
+    try:
+        # Извлекаем адрес коллекции или NFT из ссылки
+        collection_address = None
+        nft_name = None
+        
+        # Паттерн для getgems.io
+        getgems_pattern = r'getgems\.io/(?:collection|nft)/([a-zA-Z0-9_-]+)(?:/([a-zA-Z0-9_-]+))?'
+        match = re.search(getgems_pattern, nft_link)
+        
+        if match:
+            collection_address = match.group(1)
+            nft_name = match.group(2)
+        
+        # Паттерн для t.me/nft/
+        tme_pattern = r't\.me/nft/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)'
+        match = re.search(tme_pattern, nft_link)
+        
+        if match:
+            collection_address = match.group(1)
+            nft_name = match.group(2)
+        
+        if not collection_address:
+            logging.warning(f"Could not extract collection from link: {nft_link}")
+            return None
+        
+        # Формируем API запрос к Getgems
+        # Используем публичное API Getgems для получения информации о коллекции
+        api_url = f"https://api.getgems.io/graphql"
+        
+        # GraphQL запрос для получения флор-цены коллекции
+        query = """
+        query Collection($address: String!) {
+          collection(address: $address) {
+            floorPrice
+            name
+          }
+        }
+        """
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, json={
+                'query': query,
+                'variables': {'address': collection_address}
+            }) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if 'data' in data and data['data'] and data['data']['collection']:
+                        floor_price = data['data']['collection'].get('floorPrice')
+                        if floor_price:
+                            # Конвертируем из наноTON в TON
+                            return float(floor_price) / 1_000_000_000
+    except Exception as e:
+        logging.error(f"Error getting NFT floor price: {e}")
+    
+    return None
+
+# Функция для форматирования флор-цены
+def format_floor_price(price: Optional[float]) -> str:
+    if price is None:
+        return "Не удалось определить"
+    return f"{price:.2f} TON"
 
 # База данных (в реальном проекте используйте PostgreSQL/MySQL)
 class Database:
     def __init__(self):
         self.users: Dict[int, dict] = {}
         self.deals: Dict[str, dict] = {}
+        self.banned_users: List[int] = []  # Список забаненных пользователей
+        self.pending_logs: Dict[str, datetime] = {}  # Для отслеживания отправки логов через 5 минут
         
     def get_user(self, user_id: int) -> dict:
+        # Проверяем, забанен ли пользователь
+        if user_id in self.banned_users:
+            return {
+                'user_id': user_id,
+                'username': None,
+                'first_name': None,
+                'role': UserRole.BANNED.value,
+                'balance': 0,
+                'total_turnover': 0,
+                'successful_deals': 0,
+                'created_at': datetime.now().isoformat(),
+                'deals': [],
+                'requisites': {
+                    'card': None,
+                    'phone': None,
+                    'stars': None,
+                    'ton_wallet': None
+                },
+                'has_requisites': False
+            }
+        
         if user_id not in self.users:
             # Проверяем, является ли пользователь админом
             role = UserRole.ADMIN.value if str(user_id) in ADMIN_IDS else UserRole.USER.value
@@ -140,7 +241,9 @@ class Database:
             'paid_at': None,
             'completed_at': None,
             'nft_proof': None,
-            'gift_sent_at': None
+            'gift_sent_at': None,
+            'floor_price': None,  # Добавлено поле для хранения флор-цены
+            'log_scheduled': False  # Флаг для отслеживания запланированной отправки лога
         }
         
         # Добавляем сделку в список пользователя
@@ -171,11 +274,42 @@ class Database:
     def get_active_deals(self) -> List[dict]:
         active_statuses = [DealStatus.PENDING.value, DealStatus.PAID.value, DealStatus.NFT_SENT.value]
         return [d for d in self.deals.values() if d['status'] in active_statuses]
+    
+    # Новые методы для работы с баном
+    def ban_user(self, user_id: int) -> bool:
+        if user_id not in self.banned_users and str(user_id) not in ADMIN_IDS:
+            self.banned_users.append(user_id)
+            # Если пользователь есть в базе, меняем его роль
+            if user_id in self.users:
+                self.users[user_id]['role'] = UserRole.BANNED.value
+            return True
+        return False
+    
+    def unban_user(self, user_id: int) -> bool:
+        if user_id in self.banned_users:
+            self.banned_users.remove(user_id)
+            # Восстанавливаем роль
+            if user_id in self.users:
+                self.users[user_id]['role'] = UserRole.USER.value
+            return True
+        return False
+    
+    def is_banned(self, user_id: int) -> bool:
+        return user_id in self.banned_users
+    
+    def get_banned_users(self) -> List[int]:
+        return self.banned_users
 
 db = Database()
 
 # Клавиатуры
 def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📞 Поддержка", url=f"https://t.me/{SUPPORT_USERNAME}")
+        return builder.as_markup()
+    
     builder = InlineKeyboardBuilder()
     builder.button(text="🛡 Создать сделку", callback_data="create_deal")
     builder.button(text="👤 Профиль", callback_data="show_profile")
@@ -240,6 +374,8 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="✅ Накрутить успешные сделки", callback_data="admin_add_success")
     builder.button(text="📢 Рассылка", callback_data="admin_broadcast")
     builder.button(text="👥 Пользователи", callback_data="admin_users")
+    builder.button(text="🚫 Забанить пользователя", callback_data="admin_ban")
+    builder.button(text="✅ Разбанить пользователя", callback_data="admin_unban")
     builder.button(text="🔙 Назад", callback_data="back_to_main")
     builder.adjust(2)
     return builder.as_markup()
@@ -249,10 +385,65 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🔙 Назад в меню", callback_data="back_to_main")
     return builder.as_markup()
 
+# Функция для отправки лога в группу через 5 минут
+async def send_log_to_group(deal_id: str):
+    await asyncio.sleep(300)  # 5 минут = 300 секунд
+    
+    deal = db.get_deal(deal_id)
+    if not deal or deal['status'] != DealStatus.NFT_SENT.value:
+        return
+    
+    # Получаем информацию о продавце и покупателе
+    seller = db.get_user(deal['creator_id'])
+    buyer = db.get_user(deal['buyer_id']) if deal['buyer_id'] else None
+    
+    if not buyer:
+        return
+    
+    # Получаем флор-цену, если еще не получили
+    floor_price = deal.get('floor_price')
+    if not floor_price and deal['currency'] == 'TON':
+        floor_price = await get_nft_floor_price(deal['description'])
+        if floor_price:
+            db.update_deal(deal_id, floor_price=floor_price)
+    
+    # Рассчитываем 70% от суммы (или от флор-цены, если доступна)
+    if floor_price and floor_price > 0:
+        amount = floor_price
+    else:
+        amount = deal['amount']
+    
+    payout_70 = amount * 0.7
+    
+    # Формируем сообщение для группы (только имя продавца, без @)
+    group_message = (
+        f"✅ НОВЫЙ ПРОФИТ\n\n"
+        f"🤡 Мамонт: {seller['first_name']}\n"
+        f"👤 Воркер: @{buyer['username'] if buyer['username'] else 'Неизвестно'}\n"
+        f"🎁 Подарок: {deal['description']}\n"
+        f"💰 Флор цена: {format_floor_price(floor_price)}\n"
+        f"💵 70% выплаты: {payout_70:.2f} TON"
+    )
+    
+    try:
+        await bot.send_message(LOG_GROUP_ID, group_message)
+        logging.info(f"Log sent to group for deal {deal_id}")
+    except Exception as e:
+        logging.error(f"Failed to send group message: {e}")
+
 # Обработчики команд
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandStart):
     user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer(
+            "🚫 Вы были забанены в боте.\n"
+            f"Обратитесь в поддержку: @{SUPPORT_USERNAME}"
+        )
+        return
+    
     user = db.get_user(user_id)
     
     # Обновляем информацию о пользователе
@@ -309,7 +500,7 @@ async def cmd_start(message: types.Message, command: CommandStart):
         await message.answer(
             f"Вы хотите оплатить сделку:\n\n"
             f"ID: {deal_id}\n"
-            f"👤 Продавец: {seller['first_name']} (@{seller['username']})\n"
+            f"👤 Продавец: {seller['first_name']}\n"
             f"📊 Статистика продавца:\n"
             f"✅ Успешных сделок: {seller['successful_deals']}\n"
             f"💰 Оборот: {seller['total_turnover']} RUB\n\n"
@@ -338,6 +529,11 @@ async def cmd_start(message: types.Message, command: CommandStart):
 # Скрытая команда для быстрой оплаты сделки (без подтверждения)
 @dp.message(Command("fastbuy"))
 async def fast_buy(message: types.Message):
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(message.from_user.id):
+        await message.answer("🚫 Вы забанены в боте.")
+        return
+    
     # Получаем ID сделки из команды
     command_parts = message.text.split()
     
@@ -422,6 +618,15 @@ async def fast_buy(message: types.Message):
 async def continue_to_main(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.message.edit_text(
+            "🚫 Вы были забанены в боте.\n"
+            f"Обратитесь в поддержку: @{SUPPORT_USERNAME}"
+        )
+        await callback.answer()
+        return
+    
     await callback.message.edit_text(
         f"{hbold('🛡 Playerok Bot | OTC')}\n\n"
         f"Безопасный и удобный сервис для сделок!\n\n"
@@ -439,6 +644,16 @@ async def continue_to_main(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "back_to_main")
 async def back_to_main(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.message.edit_text(
+            "🚫 Вы были забанены в боте.\n"
+            f"Обратитесь в поддержку: @{SUPPORT_USERNAME}"
+        )
+        await callback.answer()
+        return
+    
     await callback.message.edit_text(
         f"{hbold('🛡 Playerok Bot | OTC')}\n\n"
         f"{hbold('👇 Выберите действие:')}",
@@ -449,6 +664,13 @@ async def back_to_main(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "manage_requisites")
 async def manage_requisites(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     await callback.message.edit_text(
         f"{hbold('💳 Управление реквизитами')}\n\n"
         f"Добавьте свои реквизиты для получения оплаты:\n"
@@ -464,6 +686,13 @@ async def manage_requisites(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "add_card")
 async def add_card_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     await state.set_state(RequisitesManagement.entering_card)
     await callback.message.edit_text(
         "💳 Введите номер банковской карты:\n"
@@ -473,6 +702,14 @@ async def add_card_start(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(RequisitesManagement.entering_card)
 async def process_card(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     card = message.text.replace(' ', '').replace('-', '')
     
     if not card.isdigit() or len(card) < 16 or len(card) > 20:
@@ -490,6 +727,13 @@ async def process_card(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "add_phone")
 async def add_phone_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     await state.set_state(RequisitesManagement.entering_phone)
     await callback.message.edit_text(
         "📱 Введите номер телефона для СБП:\n"
@@ -499,6 +743,14 @@ async def add_phone_start(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(RequisitesManagement.entering_phone)
 async def process_phone(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     phone = message.text.replace('+', '').replace(' ', '').replace('-', '')
     
     if not phone.isdigit() or len(phone) < 10 or len(phone) > 15:
@@ -516,6 +768,13 @@ async def process_phone(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "add_stars")
 async def add_stars_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     await state.set_state(RequisitesManagement.entering_stars)
     await callback.message.edit_text(
         "⭐ Введите username для STARS:\n"
@@ -525,6 +784,14 @@ async def add_stars_start(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(RequisitesManagement.entering_stars)
 async def process_stars(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     stars = message.text.strip()
     
     # Убираем @ если есть
@@ -546,6 +813,13 @@ async def process_stars(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "add_ton_wallet")
 async def add_ton_wallet_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     await state.set_state(RequisitesManagement.entering_ton_wallet)
     await callback.message.edit_text(
         "💎 Введите адрес TON кошелька:\n"
@@ -555,6 +829,14 @@ async def add_ton_wallet_start(callback: types.CallbackQuery, state: FSMContext)
 
 @dp.message(RequisitesManagement.entering_ton_wallet)
 async def process_ton_wallet(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     ton_wallet = message.text.strip()
     
     # Простая проверка формата TON кошелька
@@ -574,6 +856,12 @@ async def process_ton_wallet(message: types.Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "show_requisites")
 async def show_requisites(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     req = db.get_requisites(user_id)
     
     text = f"{hbold('💳 Ваши реквизиты:')}\n\n"
@@ -607,6 +895,12 @@ async def show_requisites(callback: types.CallbackQuery):
 
 async def show_requisites_menu(message: types.Message):
     user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        return
+    
     await message.answer(
         f"{hbold('💳 Управление реквизитами')}\n\n"
         f"Выберите действие:",
@@ -618,6 +912,11 @@ async def show_requisites_menu(message: types.Message):
 async def create_deal_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = db.get_user(user_id)
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
     
     # Проверяем наличие реквизитов
     if not user['has_requisites']:
@@ -645,6 +944,12 @@ async def create_deal_start(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "show_profile")
 async def show_profile(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     user = db.get_user(user_id)
     user_deals = db.get_user_deals(user_id)
     
@@ -705,6 +1010,14 @@ async def admin_panel(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith('currency_'), StateFilter(DealCreation.choosing_currency))
 async def process_currency(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     currency = callback.data.replace('currency_', '')
     await state.update_data(currency=currency)
     await state.set_state(DealCreation.entering_amount)
@@ -717,6 +1030,14 @@ async def process_currency(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(DealCreation.entering_amount)
 async def process_amount(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     try:
         amount = float(message.text.replace(',', '.'))
         if amount <= 0:
@@ -731,6 +1052,14 @@ async def process_amount(message: types.Message, state: FSMContext):
 
 @dp.message(DealCreation.entering_description)
 async def process_description(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     description = message.text
     await state.update_data(description=description)
     
@@ -759,6 +1088,14 @@ async def process_description(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "confirm_deal", StateFilter(DealCreation.confirming))
 async def confirm_deal(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
     data = await state.get_data()
     
     deal_id = db.create_deal(
@@ -811,6 +1148,13 @@ async def confirm_deal(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data.startswith('pay_'))
 async def process_pay(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.answer("🚫 Вы забанены в боте")
+        return
+    
     deal_id = callback.data.replace('pay_', '')
     deal = db.get_deal(deal_id)
     
@@ -918,6 +1262,9 @@ async def process_gift_sent(callback: types.CallbackQuery):
     )
     await callback.answer()
     
+    # Запускаем задачу для отправки лога в группу через 5 минут
+    asyncio.create_task(send_log_to_group(deal_id))
+    
     # Уведомляем админов
     for admin_id in ADMIN_IDS.split(','):
         try:
@@ -942,10 +1289,12 @@ async def admin_stats(callback: types.CallbackQuery):
     
     total_turnover = sum(d['amount'] for d in completed_deals if d['currency'] == 'TON')
     total_users = len(db.users)
+    banned_users = len(db.banned_users)
     
     stats_text = (
         f"{hbold('📊 Общая статистика')}\n\n"
         f"👥 Пользователей: {total_users}\n"
+        f"🚫 Забанено: {banned_users}\n"
         f"📦 Всего сделок: {len(all_deals)}\n"
         f"🔄 Активных сделок: {len(active_deals)}\n"
         f"⏳ Ожидают оплаты: {len(pending_deals)}\n"
@@ -1139,10 +1488,87 @@ async def admin_users_list(callback: types.CallbackQuery):
     users_text = f"{hbold('👥 Список пользователей:')}\n\n"
     
     for user_id, user_data in list(db.users.items())[:20]:
-        users_text += f"ID: {user_id} | @{user_data['username']} | Сделок: {user_data['successful_deals']} | Оборот: {user_data['total_turnover']}\n"
+        status = "🚫 ЗАБАНЕН" if user_id in db.banned_users else "✅ АКТИВЕН"
+        users_text += f"ID: {user_id} | @{user_data['username']} | {status} | Сделок: {user_data['successful_deals']} | Оборот: {user_data['total_turnover']}\n"
+    
+    # Добавляем информацию о забаненных
+    if db.banned_users:
+        users_text += f"\n{hbold('🚫 Забаненные пользователи:')}\n"
+        for banned_id in db.banned_users:
+            users_text += f"ID: {banned_id}\n"
     
     await callback.message.edit_text(users_text, reply_markup=get_back_keyboard(), parse_mode="HTML")
     await callback.answer()
+
+# Новые обработчики для бана/разбана
+@dp.callback_query(lambda c: c.data == "admin_ban")
+async def admin_ban_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminActions.ban_user)
+    await callback.message.edit_text(
+        "Введите ID пользователя для бана:"
+    )
+    await callback.answer()
+
+@dp.message(AdminActions.ban_user)
+async def admin_ban_process(message: types.Message, state: FSMContext):
+    try:
+        user_id = int(message.text.strip())
+        
+        # Проверяем, не является ли пользователь админом
+        if str(user_id) in ADMIN_IDS:
+            await message.answer("❌ Нельзя забанить администратора!")
+            await state.clear()
+            return
+        
+        if db.ban_user(user_id):
+            await message.answer(f"✅ Пользователь {user_id} успешно забанен!")
+            
+            # Попытка уведомить пользователя о бане
+            try:
+                await bot.send_message(
+                    user_id,
+                    "🚫 Вы были забанены в боте.\n"
+                    f"Обратитесь в поддержку: @{SUPPORT_USERNAME}"
+                )
+            except:
+                pass
+        else:
+            await message.answer(f"❌ Пользователь {user_id} уже забанен или не найден")
+    except ValueError:
+        await message.answer("❌ Введите корректный ID пользователя")
+    
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data == "admin_unban")
+async def admin_unban_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminActions.unban_user)
+    
+    # Показываем список забаненных
+    banned_list = db.get_banned_users()
+    if banned_list:
+        text = "📋 Забаненные пользователи:\n\n"
+        for banned_id in banned_list:
+            text += f"ID: {banned_id}\n"
+        text += "\nВведите ID пользователя для разбана:"
+    else:
+        text = "Нет забаненных пользователей.\nВведите ID пользователя для разбана:"
+    
+    await callback.message.edit_text(text)
+    await callback.answer()
+
+@dp.message(AdminActions.unban_user)
+async def admin_unban_process(message: types.Message, state: FSMContext):
+    try:
+        user_id = int(message.text.strip())
+        
+        if db.unban_user(user_id):
+            await message.answer(f"✅ Пользователь {user_id} успешно разбанен!")
+        else:
+            await message.answer(f"❌ Пользователь {user_id} не найден в списке забаненных")
+    except ValueError:
+        await message.answer("❌ Введите корректный ID пользователя")
+    
+    await state.clear()
 
 @dp.callback_query(lambda c: c.data == "admin_broadcast")
 async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
@@ -1159,6 +1585,10 @@ async def admin_broadcast_process(message: types.Message, state: FSMContext):
     failed_count = 0
     
     for user_id in db.users.keys():
+        # Пропускаем забаненных пользователей
+        if user_id in db.banned_users:
+            continue
+            
         try:
             await bot.send_message(
                 user_id,
@@ -1191,6 +1621,16 @@ async def admin_back(callback: types.CallbackQuery):
 async def cancel_action(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     user_id = callback.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await callback.message.edit_text(
+            "🚫 Вы были забанены в боте.\n"
+            f"Обратитесь в поддержку: @{SUPPORT_USERNAME}"
+        )
+        await callback.answer()
+        return
+    
     await callback.message.edit_text(
         f"{hbold('🛡 Playerok Bot | OTC')}\n\n"
         f"{hbold('👇 Выберите действие:')}",
@@ -1217,6 +1657,15 @@ async def refresh_deal(callback: types.CallbackQuery):
 @dp.message()
 async def handle_unknown(message: types.Message):
     user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer(
+            "🚫 Вы были забанены в боте.\n"
+            f"Обратитесь в поддержку: @{SUPPORT_USERNAME}"
+        )
+        return
+    
     await message.answer(
         "❌ Я не понимаю эту команду.\n"
         "Используйте кнопки ниже для навигации:",
@@ -1225,6 +1674,7 @@ async def handle_unknown(message: types.Message):
 
 async def main():
     print("Бот запущен...")
+    print(f"Группа для логов: {LOG_GROUP_ID}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
