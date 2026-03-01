@@ -71,6 +71,7 @@ class RequisitesManagement(StatesGroup):
     choosing_type = State()
     entering_card = State()
     entering_phone = State()
+    entering_bank = State()  # Новое состояние для ввода банка
     entering_stars = State()
     entering_ton_wallet = State()
     confirming = State()
@@ -178,6 +179,7 @@ class Database:
                 'requisites': {
                     'card': None,
                     'phone': None,
+                    'bank': None,  # Добавлено поле для банка
                     'stars': None,
                     'ton_wallet': None
                 },
@@ -200,6 +202,7 @@ class Database:
                 'requisites': {
                     'card': None,
                     'phone': None,
+                    'bank': None,  # Добавлено поле для банка
                     'stars': None,
                     'ton_wallet': None
                 },
@@ -219,7 +222,7 @@ class Database:
             self.users[user_id]['has_requisites'] = bool(req['card'] or req['phone'] or req['stars'] or req['ton_wallet'])
     
     def get_requisites(self, user_id: int) -> dict:
-        return self.users.get(user_id, {}).get('requisites', {'card': None, 'phone': None, 'stars': None, 'ton_wallet': None})
+        return self.users.get(user_id, {}).get('requisites', {'card': None, 'phone': None, 'bank': None, 'stars': None, 'ton_wallet': None})
     
     def create_deal(self, creator_id: int, currency: str, amount: float, description: str) -> str:
         # Генерируем случайный уникальный ID с символом #
@@ -757,11 +760,36 @@ async def process_phone(message: types.Message, state: FSMContext):
         await message.answer("❌ Неверный формат телефона. Попробуйте снова:")
         return
     
+    # Сохраняем телефон и переходим к вводу банка
+    await state.update_data(phone=phone)
+    await state.set_state(RequisitesManagement.entering_bank)
+    await message.answer("🏦 Введите название банка для СБП (например: Тинькофф, Сбер, Альфа-Банк):")
+
+@dp.message(RequisitesManagement.entering_bank)
+async def process_bank(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    
+    # Проверяем, не забанен ли пользователь
+    if db.is_banned(user_id):
+        await message.answer("🚫 Вы забанены в боте")
+        await state.clear()
+        return
+    
+    bank = message.text.strip()
+    
+    if len(bank) < 2 or len(bank) > 50:
+        await message.answer("❌ Введите корректное название банка (от 2 до 50 символов):")
+        return
+    
+    data = await state.get_data()
+    phone = data.get('phone')
+    
+    # Сохраняем телефон и банк
     db.add_requisite(user_id, 'phone', phone)
+    db.add_requisite(user_id, 'bank', bank)
     
     await state.clear()
-    await message.answer("✅ Телефон успешно добавлен!")
+    await message.answer("✅ Телефон и банк успешно добавлены!")
     
     # Показываем меню реквизитов
     await show_requisites_menu(message)
@@ -873,8 +901,12 @@ async def show_requisites(callback: types.CallbackQuery):
     else:
         text += "💳 Карта: не добавлена\n"
     
-    if req['phone']:
+    if req['phone'] and req['bank']:
+        text += f"📱 Телефон (СБП): +{req['phone']}\n"
+        text += f"🏦 Банк: {req['bank']}\n"
+    elif req['phone']:
         text += f"📱 Телефон: +{req['phone']}\n"
+        text += f"🏦 Банк: не указан\n"
     else:
         text += "📱 Телефон: не добавлен\n"
     
@@ -1067,6 +1099,23 @@ async def process_description(message: types.Message, state: FSMContext):
     currency = data['currency']
     amount = data['amount']
     
+    # Проверяем наличие необходимых реквизитов в зависимости от валюты
+    user = db.get_user(user_id)
+    req = user['requisites']
+    
+    if currency == 'STARS' and not req['stars']:
+        await message.answer("❌ Для создания сделки в STARS необходимо добавить STARS реквизиты в разделе 'Мои реквизиты'")
+        await state.clear()
+        return
+    elif currency == 'RUB' and not (req['card'] or req['phone']):
+        await message.answer("❌ Для создания сделки в RUB необходимо добавить карту или телефон (СБП) в разделе 'Мои реквизиты'")
+        await state.clear()
+        return
+    elif currency == 'TON' and not req['ton_wallet']:
+        await message.answer("❌ Для создания сделки в TON необходимо добавить TON кошелек в разделе 'Мои реквизиты'")
+        await state.clear()
+        return
+    
     confirm_text = (
         f"{hbold('Подтверждение создания сделки:')}\n\n"
         f"💱 Валюта: {SUPPORTED_CURRENCIES[currency]}\n"
@@ -1120,7 +1169,10 @@ async def confirm_deal(callback: types.CallbackQuery, state: FSMContext):
     if req['card']:
         masked_card = f"**** **** **** {req['card'][-4:]}"
         requisites_text += f"💳 Карта: {masked_card}\n"
-    if req['phone']:
+    if req['phone'] and req['bank']:
+        requisites_text += f"📱 Телефон (СБП): +{req['phone']}\n"
+        requisites_text += f"🏦 Банк: {req['bank']}\n"
+    elif req['phone']:
         requisites_text += f"📱 Телефон (СБП): +{req['phone']}\n"
     if req['stars']:
         requisites_text += f"⭐ STARS: @{req['stars']}\n"
@@ -1653,24 +1705,6 @@ async def refresh_deal(callback: types.CallbackQuery):
         reply_markup=get_deal_actions_keyboard(deal_id, user['role'], callback.from_user.id)
     )
     await callback.answer("🔄 Данные обновлены")
-
-@dp.message()
-async def handle_unknown(message: types.Message):
-    user_id = message.from_user.id
-    
-    # Проверяем, не забанен ли пользователь
-    if db.is_banned(user_id):
-        await message.answer(
-            "🚫 Вы были забанены в боте.\n"
-            f"Обратитесь в поддержку: @{SUPPORT_USERNAME}"
-        )
-        return
-    
-    await message.answer(
-        "❌ Я не понимаю эту команду.\n"
-        "Используйте кнопки ниже для навигации:",
-        reply_markup=get_main_keyboard(user_id)
-    )
 
 async def main():
     print("Бот запущен...")
